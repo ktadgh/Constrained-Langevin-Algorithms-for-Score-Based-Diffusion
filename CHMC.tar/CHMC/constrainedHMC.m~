@@ -1,0 +1,1578 @@
+function [q0, qs, stats] = constrainedHMC(q0,nllFunc,conFunc,Mfunc,N,L,h,opts)
+    baseOpts = struct('W',1,'printMod',1,'nllGradFunc',[],'intMethod',0,'doPrint',1,'distanceFunc',@(x0,x1) norm(x0-x1),'adaptM',[],'momentumAlpha',0);
+    if nargin < 8 || isempty(opts)
+        opts = baseOpts;
+    else
+        opts = getOpts(baseOpts,opts);
+    end
+    printMod = opts.printMod;
+    nllGradFunc = opts.nllGradFunc;
+    doPrint = opts.doPrint;
+    distanceFunc = opts.distanceFunc;
+
+    q0 = reshape(q0,[],1);
+    if nargout > 1
+        qs = zeros(length(q0),N-1);
+    end
+    if nargout > 2
+        stats.Ls = zeros(1,N);
+        stats.hs = zeros(1,N);
+        stats.dHs = zeros(1,N);
+        stats.Us = zeros(1,N);
+        stats.as = zeros(1,N);
+        stats.dxs = zeros(1,N);
+        stats.accepted = false(1,N);
+    end
+    stats.N = N;
+    stats.conFuncCalls = 0;
+    stats.nllFuncCalls = 0;
+    stats.nllGradFuncCalls = 0;
+    stats.MFuncCalls = 0;
+    stats.MGradFuncCalls = 0;
+
+    startT = tic;
+
+    
+    if ~isempty(conFunc)
+        [c0,dc0] = conFunc(q0);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    else
+        c0 = [];
+        dc0 = [];
+    end
+    if isempty(nllGradFunc)
+        [U0,dU0] = nllFunc(q0);
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    else
+        U0 = nllFunc(q0);
+        dU0 = nllGradFunc(q0);
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        assert(length(dU0) == length(q0))
+    end
+
+    if isnumeric(Mfunc)
+        M0 = Mfunc;
+    else
+        [M0,dM0] = Mfunc(q0);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.MGradFuncCalls = stats.MGradFuncCalls + 1;
+    end
+    [cholM0,Minv0] = factorizeMassMatrix(M0);
+    logNormConst0 = computeLogNormConst(cholM0,Minv0,dc0);
+
+    if isnumeric(h)
+        ch = h;
+    end
+    
+    pStepSum = 0;
+    for j = 1:N
+        prevq = q0;
+        prevU = U0;
+        if nargout > 1 && j > 1
+            qs(:,j-1) = q0;
+        end
+        
+        p0 = cholM0*randn(size(q0));
+        if ~isempty(conFunc)
+            D = dc0*Minv0;
+            p0 = p0 - D.'*((D*D.')\(D*p0));
+        end
+        
+        H0 = computeH(p0,Minv0,U0,logNormConst0);
+
+        if doPrint == 1 && (mod(j,printMod)==0)
+            fprintf('%d: ', j);
+        end
+        
+        if ~isnumeric(L)
+            cL = L();
+            if doPrint == 1 && (mod(j,printMod)==0)
+                fprintf('L = %d, ', cL);
+            end
+        else
+            cL = L;
+        end
+        if ~isnumeric(h)
+            ch = h();
+            if doPrint == 1 && (mod(j,printMod)==0)
+                fprintf('h = %g, ', abs(ch));
+            end
+        end
+        if isnumeric(Mfunc)
+            [q,p,c,dc,U,dU,stats] = constantMInt_Leapfrog(nllFunc,conFunc,cL,ch,q0,p0,Minv0,c0,dc0,U0,dU0,nllGradFunc,stats);
+            cholM = cholM0;
+            Minv = Minv0;
+        else
+            [q,p,M,dM,c,dc,U,dU,stats] = variableMInt_Leapfrog(nllFunc,conFunc,Mfunc,cL,ch,q0,p0,M0,dM0,c0,dc0,U0,dU0,nllGradFunc,stats);
+            [cholM,Minv] = factorizeMassMatrix(M);
+        end
+        
+        if norm(c) > sqrt(1e-3) || isempty(p)
+            H = inf;
+            deltaU = inf;
+            deltaH = inf;
+        else
+            logNormConst = computeLogNormConst(cholM,Minv,dc);
+            H = computeH(p,Minv,U,logNormConst);
+            %             H = computeH(p,cholM,Minv,U,dc);
+            deltaU = U-U0;
+            deltaH = H-H0;
+        end
+        
+        currA = min([1,exp(-deltaH)]);
+        pStepSum = pStepSum + currA;
+        if (H < inf) && (~isnan(H)) && (deltaH < 0 || erand > deltaH)
+            accept = 1;
+        else
+            accept = 0;
+        end
+        
+        if accept
+            q0 = q;
+            c0 = c;
+            dc0 = dc;
+            U0 = U;
+            dU0 = dU;
+            logNormConst0 = logNormConst;
+            if ~isnumeric(Mfunc)
+                % only update mass matrix if it's state dependant
+                cholM0 = cholM;
+                M0 = M;
+                Minv0 = Minv;
+                dM0 = dM;
+            end
+        end
+        
+        cdx = distanceFunc(prevq,q0);
+        if (doPrint == 1) && (mod(j,printMod)==0)
+            if ~accept
+                if isempty(q)
+                    accStr = 'convergence failure, ';
+                else
+                    accStr = sprintf('dPropU = %g, ||x-propx|| = %g, ',deltaU,distanceFunc(q0,q));
+                end
+            else
+                accStr = '';
+            end
+            if ~isempty(conFunc)
+                projdU = dU0 - dc0.'*((dc0*dc0.')\(dc0*dU0));
+            else
+                projdU = dU0;
+            end
+            fprintf('U = %g, dU = %g, dH = %g, ||dudx|| = %g, ||c|| = %g, ||dx|| = %g, %sa = %g, E[a] = %g\n',U0,U0-prevU,deltaH,norm(projdU),norm(c0),cdx,accStr,currA,pStepSum/j);
+            drawnow;
+        end
+        
+        if nargout > 2
+            stats.Ls(j) = cL;
+            stats.hs(j) = ch;
+            stats.dHs(j) = deltaH; % Proposed dH
+            stats.Us(j) = U0;
+            stats.dxs(j) = cdx;
+            stats.as(j) = min([1,exp(-deltaH)]);
+            stats.accepted(j) = accept;
+        end
+    end
+    if doPrint == 2
+        fprintf('E[p(accept)] = %g\n',pStepSum/N);
+    end
+    stats.t = toc(startT);
+end
+
+function opts = getOpts(opts,newOpts)
+    S = fieldnames(newOpts);
+    for i = 1:length(S)
+        opts.(S{i}) = newOpts.(S{i});
+    end
+end
+
+function [cholM,Minv] = factorizeMassMatrix(M,isinvM)
+    if nargin < 2
+        isinvM = false;
+    end
+    if isinvM
+        if isscalar(M)
+            cholM = 1./sqrt(M);
+            Minv = 1./M;
+        elseif isvector(M)
+            cholM = spdiags(reshape(1./sqrt(M),[],1),0,length(M),length(M));
+            Minv = spdiags(reshape(1./M,[],1),0,length(M),length(M));
+        else
+            cholM = chol(M,'lower');
+            Minv = (cholM.'\(cholM\speye(size(M))));
+            cholM = chol(M,'lower');
+        end
+    else
+        if isscalar(M)
+            cholM = sqrt(M);
+            Minv = 1./M;
+        elseif isvector(M)
+            cholM = spdiags(reshape(sqrt(M),[],1),0,length(M),length(M));
+            Minv = spdiags(reshape(1./M,[],1),0,length(M),length(M));
+        else
+            cholM = chol(M,'lower');
+            Minv = (cholM.'\(cholM\speye(size(M))));
+        end
+    end
+end
+
+function logNormConst = computeLogNormConst(cholM,Minv,dc)
+    if isscalar(cholM)
+        logNormConst = (size(dc,2) - size(dc,1))*log(cholM);
+    else
+        D = dc*Minv;
+        if isvector(cholM)
+            cholMhat = spdiag(cholM) - D.'*((D*D.')\(D*spdiag(cholM)));
+        else
+            cholMhat = cholM - D.'*((D*D.')\(D*cholM));
+        end
+        Mhat = cholMhat*cholMhat.';
+        s = eigs(Mhat,size(dc,2)-size(dc,1),'lm');
+        logNormConst = 0.5*sum(log(s));
+%         % FIXME: there is almost certainly a better way to do this...
+%         s = eigs(cholMhat,size(dc,2)-size(dc,1),'lm');
+%         logNormConst = sum(log(s));
+    end
+end
+
+function H = computeH(p,Minv,U,logNormConst)
+    H = 0.5*p.'*Minv*p + logNormConst + U;
+end
+
+function [q,p,c,dc,U,dU,stats] = constantMInt_Leapfrog(nllFunc,conFunc,L,h,q,p,Minv,c,dc,U,dU,nllGradFunc,stats)
+    fThresh = 1e-5;
+    dxThresh = 1e-6;
+    maxIts = 100;
+
+    if ~isempty(conFunc) && (isempty(c) || isempty(dc))
+        [c,dc] = conFunc(q);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(U) || isempty(dU)
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+        else
+            U = nllFunc(q);
+            dU = nllGradFunc(q);
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+
+
+    for i = 1:L
+        if ~isempty(conFunc)
+            A = -(h/2)*(Minv*dc.');
+            %A = -((h*h)/2)*(Minv*dc.');
+            p12hat = p - (h/2)*dU;
+            q12hat = q + h*(Minv*p12hat);
+            
+            %%%%%% START simple_fsolve %%%%%%
+%             curr_q = q12hat + A*lambda;
+            lambda = zeros([length(c),1]);
+            curr_q = q12hat;
+            [curr_c,curr_dc] = conFunc(curr_q);
+            stats.conFuncCalls = stats.conFuncCalls + 1;
+            it = 0;
+            while max(abs(curr_c)) > fThresh
+                it = it + 1;
+
+                dlambda = (curr_dc*A)\curr_c;
+                lambda = lambda - dlambda;
+
+                curr_q = q12hat + A*lambda;
+                [curr_c,curr_dc] = conFunc(curr_q);
+                stats.conFuncCalls = stats.conFuncCalls + 1;
+%                 curr_q
+%                 curr_c
+
+                if max(abs(dlambda)) < dxThresh && max(abs(curr_c)) > fThresh
+%                     warning('Change in x is below threshold, bailing out');
+%                     break;
+                    q = [];
+                    p = [];
+                    c = [];
+                    dc = [];
+                    U = [];
+                    dU = [];
+                    return;
+                end
+
+                if it >= maxIts && max(abs(curr_c)) > fThresh
+%                     warning('Maximum number of iterations hit, bailing out');
+%                     break;
+                    q = [];
+                    p = [];
+                    c = [];
+                    dc = [];
+                    U = [];
+                    dU = [];
+                    return;
+                end
+            end
+            %%%%%% END simple_fsolve %%%%%%
+
+            p12 = p12hat - dc.'*((1/2)*lambda);
+            %p12 = p12hat - dc.'*((h/2)*lambda);
+            
+            if max(abs(curr_c)) > fThresh
+                break;
+            end
+            
+            q = curr_q;
+            c = curr_c;
+            dc = curr_dc;
+        else
+            p12 = p - (h/2)*dU;
+            q = q + h*(Minv*p12);
+            if(any(isnan(p12)))
+                q = [];
+                p = [];
+                U = [];
+                dU = [];
+                return;
+            end
+        end
+
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+            stats.nllFuncCalls = stats.nllFuncCalls + 1;
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        else
+            dU = nllGradFunc(q);
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        end
+
+        if ~isempty(conFunc)
+            A = (h/2)*dc*(Minv*dc.');
+            b = dc*(Minv*(p12 - (h/2)*dU));
+            mu = A\b;
+            p = p12 - (h/2)*(dU + dc.'*mu);
+        else
+            p = p12 - (h/2)*dU;
+        end
+    end
+    if ~isempty(nllGradFunc)
+        U = nllFunc(q);
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+    end
+end
+
+function [q,p,cholM,c,dc,U,dU,h] = constantMIntVarH(nllFunc,conFunc,L,h,q,p,cholM,c,dc,U,dU)
+    options = optimset('Display','off','Jacobian','on','TolFun',1e-6,'MaxIter',400,'Algorithm','trust-region-dogleg');
+%     options = optimset('Display','off','Jacobian','on','TolFun',1e-6,'MaxIter',400,'Algorithm','trust-region-reflective');
+
+    E = length(c);
+    D = length(dU);
+    
+    if isempty(c) || isempty(dc)
+        [c,dc] = conFunc(q);
+    end
+    if isempty(U) || isempty(dU)
+        [U,dU] = nllFunc(q);
+    end
+
+    lambda = zeros([length(c),1]);
+    if isempty(h)
+        h = 0.1;
+    end
+    tol = 1e-3;
+
+%     normConstM = 0.5*sum(log((2*pi)*diag(cholM)));
+%     H0 = 0.5*p.'*(cholM.'\(cholM\p)) + normConstM + U;
+    for i = 1:L
+        normConstM = 0.5*sum(log((2*pi)*diag(cholM)));
+        H0 = 0.5*p.'*(cholM.'\(cholM\p)) + normConstM + U;
+
+%         p12hat = p - (h/2)*dU;
+%         q12hat = q + h*(cholM.'\(cholM\p12hat));
+%         A = -0.5*h^2*(cholM.'\(cholM\dc.'));
+% 
+%         lambda = simple_fsolve(@(x) lambdaFunc(x,q12hat,conFunc,A),lambda);
+%         p12 = p12hat - (h/2)*dc.'*lambda;
+%         q1 = q12hat + A*lambda;
+        
+        p12 = p - (h/2)*dU;
+        q1 = q + h*(cholM.'\(cholM\p12));
+
+        x = [sqrt(2*h); lambda; p12; q1];
+%         [x fx] = fsolve(@(x) varStepFunc(x,nllFunc,conFunc,cholM,q,p,c,dc,U,dU,H0,tol),x,options);
+        [x fx] = simple_fsolve(@(x) varStepFunc(x,nllFunc,conFunc,cholM,q,p,c,dc,U,dU,H0,tol),x);
+        
+        h = 0.5*x(1)^2;
+        lambda = reshape(x(1+(1:E)),[E,1]);
+        p12 = reshape(x(1+E+(1:D)),[D,1]);
+        q = reshape(x(1+E+D+(1:D)),[D,1]);
+
+        fprintf('%d: h = %g, ||fx|| = %g\n',i,h,norm(fx));
+
+        [c,dc] = conFunc(q);
+        if norm(c) > sqrt(1e-3)
+            break;
+        end
+        
+        [U,dU] = nllFunc(q);
+
+        A = (h/2)*dc*(cholM.'\(cholM\dc.'));
+        b = dc*(cholM.'\(cholM\(p12 - (h/2)*dU)));
+        mu = A\b;
+        p = p12 - (h/2)*(dU + dc.'*mu);
+    end
+end
+
+function [f,J] = varStepFunc(x,nllFunc,conFunc,cholM,q,p,c,dc,U,dU,H0,tol)
+    E = length(c);
+    D = length(dU);
+    
+    h = 0.5*x(1)^2;
+    lambda = reshape(x(1+(1:E)),[E,1]);
+    p12 = reshape(x(1+E+(1:D)),[D,1]);
+    q1 = reshape(x(1+E+D+(1:D)),[D,1]);
+    
+    if nargout > 1
+        [fc dfcdq1] = conFunc(q1);
+        dfcdh = sparse(E,1);
+        dfcdp12 = sparse(E,D);
+        dfcdlambda = sparse(E,E);
+    else
+        fc = conFunc(q1);
+    end
+
+    normConstM = 0.5*sum(log((2*pi)*diag(cholM)));
+    q12 = 0.5*(q+q1);
+    if nargout > 1
+        [U12,dU12] = nllFunc(q12);
+    else
+        U12 = nllFunc(q12);
+    end
+    Minvp12 = (cholM.'\(cholM\p12));
+    H = 0.5*p12.'*Minvp12 + normConstM + U12;
+    fe = 0.5*((H-H0)^2./tol - 1);
+    if nargout > 1
+        dHdq1 = 0.5*dU12.';
+        dHdp12 = Minvp12.';
+
+        dfedh = 0;
+        dfedlambda = sparse(1,E);
+        dfedp12 = (H-H0)./tol*dHdp12;
+        dfedq1 = (H-H0)./tol*dHdq1;
+    end
+    
+    fp12 = p12 - (p - (h/2)*(dU + dc.'*lambda));
+    if nargout > 1
+        dfp12dh = dU + dc.'*lambda;
+        dfp12dlambda = 0.5*h*dc.';
+        dfp12dp12 = speye(D);
+        dfp12dq1 = sparse(D,D);
+    end
+
+    fq1 = q1 - (q + h*p12);
+    if nargout > 1
+        dfq1dh = -p12;
+        dfq1dlambda = sparse(D,E);
+        dfq1dp12 = -h*speye(D);
+        dfq1dq1 = speye(D);
+    end
+
+    f = [fe;fc;fp12;fq1];
+    if nargout > 1
+        J = [ dfedh*x(1) dfedlambda dfedp12 dfedq1;
+              dfcdh*x(1) dfcdlambda dfcdp12 dfcdq1;
+              dfp12dh*x(1) dfp12dlambda dfp12dp12 dfp12dq1;
+              dfq1dh*x(1) dfq1dlambda dfq1dp12 dfq1dq1 ];
+    end
+end
+
+function [q,p,c,dc,U,dU,stats] = constantMInt_Leapfrog2(nllFunc,conFunc,L,h,q,p,Minv,c,dc,U,dU,nllGradFunc,stats)
+    fThresh = 1e-4;
+    dxThresh = 1e-6;
+    maxIts = 50;
+
+    if ~isempty(conFunc)&&(isempty(c) || isempty(dc))
+        [c,dc] = conFunc(q);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(U) || isempty(dU)
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+        else
+            U = nllFunc(q);
+            dU = nllGradFunc(q);
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+    
+    lambda = zeros([length(c),1]);
+
+    for i = 1:L
+        if i == 1
+            pstepHScale = (1/2);
+        else
+            pstepHScale = 1;
+        end
+        p12hat = p - (pstepHScale*h)*dU;
+        if ~isempty(conFunc)
+            A = -(pstepHScale*h)*(Minv*dc.');
+        end
+
+        if ~isempty(conFunc)
+            q12hat = q + h*(Minv*p12hat);
+            %%%%%% START simple_fsolve %%%%%%
+            curr_q = q12hat + A*lambda;
+            [curr_c,curr_dc] = conFunc(curr_q);
+            stats.conFuncCalls = stats.conFuncCalls + 1;
+            it = 0;
+            while max(abs(curr_c)) > fThresh
+                it = it + 1;
+
+                dlambda = (curr_dc*A)\curr_c;
+                lambda = lambda - dlambda;
+
+                curr_q = q12hat + A*lambda;
+                [curr_c,curr_dc] = conFunc(curr_q);
+                stats.conFuncCalls = stats.conFuncCalls + 1;
+
+                if max(abs(dlambda)) < dxThresh && max(abs(curr_c)) > fThresh
+%                     warning('Change in x is below threshold, bailing out');
+%                     break;
+                    q = [];
+                    p = [];
+                    c = [];
+                    dc = [];
+                    U = [];
+                    dU = [];
+                    return;
+                end
+
+                if it >= maxIts && max(abs(curr_c)) > fThresh
+%                     warning('Maximum number of iterations hit, bailing out');
+%                     break;
+                    q = [];
+                    p = [];
+                    c = [];
+                    dc = [];
+                    U = [];
+                    dU = [];
+                    return;
+                end
+            end
+            %%%%%% END simple_fsolve %%%%%%
+
+            p12 = p12hat - dc.'*(pstepHScale*lambda);
+            
+            if max(abs(curr_c)) > fThresh
+                break;
+            end
+            
+            q = curr_q;
+            c = curr_c;
+            dc = curr_dc;
+        else
+            q = q + h*(Minv*p12hat);
+            p12 = p12hat;
+        end
+
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+            stats.nllFuncCalls = stats.nllFuncCalls + 1;
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        else
+            dU = nllGradFunc(q);
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        end
+    end
+
+    if ~isempty(conFunc)
+        A = (h/2)*dc*(Minv*dc.');
+        b = dc*(Minv*(p12 - (h/2)*dU));
+        mu = A\b;
+        p = p12 - (h/2)*(dU + dc.'*mu);
+    else
+        p = p12 - (h/2)*dU;
+    end
+
+    if ~isempty(nllGradFunc)
+        U = nllFunc(q);
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+    end
+end
+
+function [q,p,c,dc,U,dU,stats] = constantMInt_Lobatto(nllFunc,conFunc,L,h,q,p,Minv,c,dc,U,dU,nllGradFunc,stats)
+    if ~isempty(conFunc)&&(isempty(c) || isempty(dc))
+        [c,dc] = conFunc(q);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(U) || isempty(dU)
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+        else
+            U = nllFunc(q);
+            dU = nllGradFunc(q);
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+    
+    if isscalar(Minv)
+        Hpfunc = @(p,q) Minv.*p;
+        Hppfunc = @(q) Minv*eye(length(p));
+        Minv = Minv*eye(length(p));
+    elseif isvector(Minv)
+        Hpfunc = @(p,q) Minv.*p;
+        Hppfunc = @(q) spdiags(Minv,0,length(q),length(q));
+        Minv = diag(Minv);
+    else
+        Hpfunc = @(p,q) Minv*p;
+        Hppfunc = @(q) Minv;
+    end
+
+    Lambda = [];
+    for i = 1:L
+        [p,q,U,dU,c,dc,Minv,Lambda,stats] = lobattoStep(p,q,U,dU,c,dc,Minv,Lambda,h,Hpfunc,Hppfunc,nllFunc,conFunc,nllGradFunc,stats);
+        if isempty(p)
+            break;
+        end
+    end
+end
+
+function Hq = wrap_Hqfunc(p,q,nllFunc,nllGradFunc,Mfunc)
+    [M,dM] = Mfunc(q);
+    D = size(M,1);
+    Minv = inv(M);
+    MinvdM = vec_matmult(Minv,0,dM,0);
+    pMat = reshape(vec_matmult(MinvdM,0,Minv,0),D^2,D).';
+    MinvdM = reshape(MinvdM,D^2,D);
+    trMinvdM = sum(MinvdM(1:(D+1):D^2,:),1).';
+    
+    if isempty(nllGradFunc)
+        [~,dU] = nllFunc(q);
+    else
+        dU = nllGradFunc(q);
+    end
+    Hq = 0.5*pMat*reshape(p*p.',[],1) - 0.5*trMinvdM + dU;
+end
+
+function [q,p,M,dM,c,dc,U,dU,stats] = variableMInt_Lobatto(nllFunc,conFunc,Mfunc,L,h,q,p,M,dM,c,dc,U,dU,nllGradFunc,stats)
+    if ~isempty(conFunc)&&(isempty(c) || isempty(dc))
+        [c,dc] = conFunc(q);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(U) || isempty(dU)
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+        else
+            U = nllFunc(q);
+            dU = nllGradFunc(q);
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+    if isempty(M) || isempty(dM)
+        [M,dM] = Mfunc(q);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.MGradFuncCalls = stats.MGradFuncCalls + 1;
+    end
+    
+    Hqfunc = @(p,q) wrap_Hqfunc(p,q,nllFunc,nllGradFunc,Mfunc);
+    Hpfunc = @(p,q) Mfunc(q)\p;
+    Hppfunc = @(q) inv(Mfunc(q));
+    Minv = inv(Mfunc(q));
+
+    warning('This is far from the most efficient implementation of this.  There will be many wasted (and uncounted) calls to Mfunc');
+    Lambda = [];
+    for i = 1:L
+        [p,q,c,dc,Minv,Lambda] = lobattoStep_generic(p,q,c,dc,Minv,Lambda,h,Hpfunc,Hppfunc,Hqfunc,conFunc);
+%         [p,q,U,dU,c,dc,Minv,Lambda,stats] = lobattoStep(p,q,U,dU,c,dc,Minv,Lambda,h,Hpfunc,Hppfunc,nllFunc,conFunc,nllGradFunc,stats);
+        if isempty(p)
+            break;
+        end
+    end
+end
+
+function g = wrapNLLFunc(q,nllFunc)
+    [~,g] = nllFunc(q);
+end
+
+function [f,J] = lambdaFunc(lambda,q12hat,conFunc,A)
+    q1 = q12hat + A*lambda;
+    if nargout > 1
+        [f df] = conFunc(q1);
+        J = df*A;
+    else
+        f = conFunc(q1);
+    end
+end
+
+% function [q,p,M,dM,c,dc,U,dU] = variableMInt(nllFunc,conFunc,Mfunc,L,h,q,p,M,dM,c,dc,U,dU)
+%     if isempty(c) || isempty(dc)
+%         [c,dc] = conFunc(q);
+%     end
+%     if isempty(U) || isempty(dU)
+%         [U,dU] = nllFunc(q);
+%     end
+%     if isempty(M) || isempty(dM)
+%         [M,dM] = Mfunc(q);
+%     end
+%     lambda = zeros([length(c),1]);
+% 
+%     for i = 1:L
+%         [p,q,lambda,M,dM,c,dc,U,dU] = singleLeapfrogStep(nllFunc,conFunc,Mfunc,p,q,lambda,h,M,dM,dc,dU);
+%     end
+% end
+
+function [q,p,M,dM,c,dc,U,dU,stats] = variableMInt_Leapfrog_Old(nllFunc,conFunc,Mfunc,L,h,q,p,M,dM,c,dc,U,dU,nllGradFunc,stats)
+    fThresh = 1e-4;
+    dxThresh = 1e-8;
+    maxIts = 50;
+
+    if isempty(c) || isempty(dc)
+        [c,dc] = conFunc(q);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(U) || isempty(dU)
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+            stats.nllFuncCalls = stats.nllFuncCalls + 1;
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        else
+            U = nllFunc(q);
+            dU = nllGradFunc(q);
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+    if isempty(M) || isempty(dM)
+        [M,dM] = Mfunc(q);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.MGradFuncCalls = stats.MGradFuncCalls + 1;
+    end
+    lambda = zeros([length(c),1]);
+
+    E = size(dc,1);
+    D = size(dc,2);
+
+    Minv = inv(M);
+    MinvdM = vec_matmult(Minv,0,dM,0);
+    pMat = reshape(vec_matmult(MinvdM,0,Minv,0),D^2,D).';
+    MinvdM = reshape(MinvdM,D^2,D);
+    trMinvdM = sum(MinvdM(1:(D+1):D^2,:),1).';
+
+    for i = 1:L
+%         [p12,q1] = initStep_varM(nllFunc,conFunc,Mfunc,h,q,p,M,dM,c,dc,U,dU);
+        p12 = p - (h/2)*(dU + dc.'*lambda);
+        q1 = q + h*(Minv*p12);
+
+        M1inv = inv(Mfunc(q1));
+        [c1,dc1] = conFunc(q1);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+        
+        nIts = 0;
+        while true
+            J = dc1*((h/2)*(Minv + M1inv)*(-(h/2)*dc.'));
+            dlambda = J\(-c1);
+            lambda = lambda + dlambda;
+
+            dp12 = (p - (h/2)*(0.5*pMat*reshape(p12*p12.',[],1) - 0.5*trMinvdM + dU + dc.'*lambda)) - p12;
+            p12 = p12 + dp12;
+
+            dq1 = (q + (h/2)*(Minv + M1inv)*p12) - q1;
+            q1 = q1 + dq1;
+
+            M1inv = inv(Mfunc(q1));
+            [c1,dc1] = conFunc(q1);
+            stats.MFuncCalls = stats.MFuncCalls + 1;
+            stats.conFuncCalls = stats.conFuncCalls + 1;
+
+%             fprintf('%d: ||c|| = %g, ||dq|| = %g, ||dp|| = %g\n',nIts,max(abs(c1)),norm(dq1),norm(dp12));
+            if max(abs(c1)) < fThresh && norm(dq1) < dxThresh && norm(dp12) < dxThresh
+                break;
+            end
+            
+            nIts = nIts + 1;
+            if nIts >= maxIts
+                break;
+            end
+        end
+        if nIts >= maxIts
+            p(:) = inf;
+            break;
+        end
+        
+        q = q1;
+        c = c1;
+        dc = dc1;
+
+        [M,dM] = Mfunc(q);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.MGradFuncCalls = stats.MGradFuncCalls + 1;
+
+        Minv = inv(M);
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+            stats.nllFuncCalls = stats.nllFuncCalls + 1;
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        else
+            dU = nllGradFunc(q);
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        end
+
+%         dH = computeHq(p12,M1inv,dM1,dU1);
+        MinvdM = vec_matmult(Minv,0,dM,0);
+        pMat = reshape(vec_matmult(MinvdM,0,Minv,0),D^2,D).';
+        MinvdM = reshape(MinvdM,D^2,D);
+        trMinvdM = sum(MinvdM(1:(D+1):D^2,:),1).';
+        dH = 0.5*pMat*reshape(p12*p12.',[],1) - 0.5*trMinvdM + dU;
+    
+        A = (h/2)*dc*M1inv*dc.';
+        b = dc*M1inv*(p12 - (h/2)*dH);
+        mu = A\b;
+        p = p12 - (h/2)*(dH + dc.'*mu);
+    end
+    
+    if ~isempty(nllGradFunc)
+        U = nllFunc(q);
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+    end
+end
+
+function [p12,q1] = initStep_varM(nllFunc,conFunc,Mfunc,h,q,p,M,dM,c,dc,U,dU)
+    nSubSteps = 10;
+    h = h/(2*nSubSteps);
+    for i = 1:nSubSteps
+        cp12 = p - (h/2)*(dU + dc.'*lambda);
+        q = q + h*(M\cp12);
+
+        M = Mfunc(q);
+        [U,dU] = nllFunc(q);
+
+        A = (h/2)*dc*M1inv*dc.';
+        b = dc*M1inv*(cp12 - (h/2)*dH);
+        mu = A\b;
+        p = cp12 - (h/2)*(dH + dc.'*mu);
+    end
+    p12 = p;
+    for i = 1:nSubSteps
+        cp12 = p - (h/2)*(dU + dc.'*lambda);
+        q = q + h*(M\cp12);
+
+        M = Mfunc(q);
+        [U,dU] = nllFunc(q);
+
+        A = (h/2)*dc*M1inv*dc.';
+        b = dc*M1inv*(cp12 - (h/2)*dH);
+        mu = A\b;
+        p = cp12 - (h/2)*(dH + dc.'*mu);
+    end
+    q1 = q;
+end
+
+function [q,p,M,dM,c,dc,U,dU,stats] = variableMInt_Leapfrog(nllFunc,conFunc,Mfunc,L,h,q,p,M,dM,c,dc,U,dU,nllGradFunc,stats)
+    fThresh = 1e-4;
+    dxThresh = 1e-6;
+    maxIts = 50;
+
+    if ~isempty(conFunc)&&(isempty(c) || isempty(dc))
+        [c,dc] = conFunc(q);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(U) || isempty(dU)
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+        else
+            U = nllFunc(q);
+            dU = nllGradFunc(q);
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+    if isempty(M) || isempty(dM)
+        [M,dM] = Mfunc(q);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.MGradFuncCalls = stats.MGradFuncCalls + 1;
+    end
+
+    E = size(dc,1);
+    D = size(dc,2);
+
+    Minv = inv(M);
+    MinvdM = vec_matmult(Minv,0,dM,0);
+    pMat = reshape(vec_matmult(MinvdM,0,Minv,0),D^2,D).';
+    MinvdM = reshape(MinvdM,D^2,D);
+    trMinvdM = sum(MinvdM(1:(D+1):D^2,:),1).';
+
+    for i = 1:L
+%         [p12,q1] = initStep_varM(nllFunc,conFunc,Mfunc,h,q,p,M,dM,c,dc,U,dU);
+        p12 = p - (h/2)*(-0.5*pMat*reshape(p*p.',[],1) + 0.5*trMinvdM + dU);
+        q1 = q + h*(Minv*p12);
+
+        lambda = zeros([length(c),1]);
+        M1inv = Minv; %inv(Mfunc(q1));
+        [c1,dc1] = conFunc(q1);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+        
+        nIts = 0;
+        while true
+            %J = dc1*((h/2)*(Minv + M1inv)*(-(h/2)*dc.'));
+            J = dc1*((h/4)*(Minv + M1inv)*(-dc.'));
+            dlambda = J\(-c1);
+            lambda = lambda + dlambda;
+
+            M1inv = inv(Mfunc(q1));
+
+            %dp12 = (p - (h/2)*(-0.5*pMat*reshape(p12*p12.',[],1) + 0.5*trMinvdM + dU + dc.'*lambda)) - p12;
+            dp12 = (p - (h/2)*(-0.5*pMat*reshape(p12*p12.',[],1) + 0.5*trMinvdM + dU) - (1/2)*dc.'*lambda) - p12;
+            p12 = p12 + dp12;
+            
+            dq1 = (q + (h/2)*(Minv + M1inv)*p12) - q1;
+            q1 = q1 + dq1;
+            
+            [c1,dc1] = conFunc(q1);
+            stats.MFuncCalls = stats.MFuncCalls + 1;
+            stats.conFuncCalls = stats.conFuncCalls + 1;
+
+            %fprintf('%d: ||c|| = %g, ||dq|| = %g, ||dp|| = %g\n',nIts,max(abs(c1)),norm(dq1),norm(dp12));
+            %if max(abs(c1)) < fThresh && norm(dq1) < dxThresh && norm(dp12) < dxThresh
+            if max(abs(c1)) < fThresh % && norm(dq1) < dxThresh && norm(dp12) < dxThresh
+                break;
+            end
+            
+            nIts = nIts + 1;
+            if nIts >= maxIts
+                break;
+            end
+        end
+        if nIts >= maxIts
+            q = [];
+            p = [];
+            c = [];
+            dc = [];
+            U = [];
+            dU = [];
+            M = [];
+            dM = [];
+%            p(:) = inf;
+            break;
+        end
+        
+        q = q1;
+        c = c1;
+        dc = dc1;
+
+        [M,dM] = Mfunc(q);
+        stats.MFuncCalls = stats.MFuncCalls + 1;
+        stats.MGradFuncCalls = stats.MGradFuncCalls + 1;
+
+        Minv = inv(M);
+        M1inv = Minv;
+        if isempty(nllGradFunc)
+            [U,dU] = nllFunc(q);
+            stats.nllFuncCalls = stats.nllFuncCalls + 1;
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        else
+            dU = nllGradFunc(q);
+            stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+        end
+
+%         dH = computeHq(p12,M1inv,dM1,dU1);
+        MinvdM = vec_matmult(Minv,0,dM,0);
+        pMat = reshape(vec_matmult(MinvdM,0,Minv,0),D^2,D).';
+        MinvdM = reshape(MinvdM,D^2,D);
+        trMinvdM = sum(MinvdM(1:(D+1):D^2,:),1).';
+        dH = -0.5*pMat*reshape(p12*p12.',[],1) + 0.5*trMinvdM + dU;
+    
+        A = (h/2)*dc*M1inv*dc.';
+        b = dc*M1inv*(p12 - (h/2)*dH);
+        mu = A\b;
+        p = p12 - (h/2)*(dH + dc.'*mu);
+    end
+    
+    if ~isempty(nllGradFunc)
+        U = nllFunc(q);
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+    end
+end
+
+function dH = computeHq(p,Minv,dM,dU)
+    D = length(p);
+
+    MinvdM = vec_matmult(Minv,0,dM,0);
+    pMat = reshape(vec_matmult(MinvdM,0,Minv,0),D^2,D).';
+    MinvdM = reshape(MinvdM,D^2,D);
+    trMinvdM = sum(MinvdM(1:(D+1):D^2,:),1).';
+    dH = 0.5*pMat*reshape(p*p.',[],1) - 0.5*trMinvdM + dU;
+end
+
+function [p1,q1,lambda,M1,dM1,c1,dc1,U1,dU1] = singleLeapfrogStep(nllFunc,conFunc,Mfunc,p0,q0,lambda,h,M,dM,dc,dU)
+    E = size(dc,1);
+    D = size(dc,2);
+
+%     options = optimset('Display','off','Jacobian','on','TolFun',1e-6,'MaxIter',400,'Algorithm','trust-region-dogleg');
+
+    fThresh = 1e-4;
+    dxThresh = 1e-6;
+
+    Minv = inv(M);
+    MinvdM = vec_matmult(Minv,0,dM,0);
+    pMat = reshape(vec_matmult(MinvdM,0,Minv,0),length(p0)^2,length(q0)).';
+    MinvdM = reshape(MinvdM,length(p0)^2,length(q0));
+    trMinvdM = sum(MinvdM(1:(length(p0)+1):length(p0)^2,:),1).';
+    
+
+    p12 = p0 - (h/2)*(dU + dc.'*lambda);
+    q1 = q0 + h*(Minv*p12);
+
+%     p12hat = p0 - (h/2)*dU;
+%     q12hat = q0 + h*Minv*p12hat;
+%     A = -0.5*h^2*Minv*dc.';
+%     [lambda c] = simple_fsolve(@(x) lambdaFunc(x,q12hat,conFunc,A),lambda);
+%     p12 = p12hat - (h/2)*dc.'*lambda;
+%     q1 = q12hat + A*lambda;
+
+    M1inv = inv(Mfunc(q1));
+    [c1,dc1] = conFunc(q1);
+    while true
+        J = dc1*((h/2)*(Minv + M1inv)*(-(h/2)*dc.'));
+        dlambda = J\(-c1);
+        lambda = lambda + dlambda;
+
+        dp12 = -p12 + (p0 - (h/2)*(0.5*pMat*reshape(p12*p12.',[],1) - 0.5*trMinvdM + dU + dc.'*lambda));
+        p12 = p12 + dp12;
+
+        dq1 = -q1 + (q0 + (h/2)*(Minv + M1inv)*p12);
+        q1 = q1 + dq1;
+        
+        M1inv = inv(Mfunc(q1));
+        [c1,dc1] = conFunc(q1);
+        
+        fprintf('||c|| = %g, ||dq|| = %g, ||dp|| = %g\n',max(abs(c1)),norm(dq1),norm(dp12));
+        if max(abs(c1)) < fThresh && norm(dq1) < dxThresh && norm(dp12) < dxThresh
+            break;
+        end
+    end
+
+%     x = [p12;q1;lambda];
+%     x = fsolve(@(x) varM_p12_q1_lambda_func(x,conFunc,Mfunc,p0,q0,h,pMat,Minv,trMinvdM,dU,dc),x,options);
+% %     x = simple_fsolve(@(x) varM_p12_q1_lambda_func(x,conFunc,Mfunc,p0,q0,h,pMat,Minv,trMinvdM,dU,dc),x);
+%     lambda = reshape(x((1:E)),[E,1]);
+%     p12 = reshape(x(E+(1:D)),[D,1]);
+%     q1 = reshape(x(E+D+(1:D)),[D,1]);
+%     
+%     [c1 dc1] = conFunc(q1);
+
+    [M1,dM1] = Mfunc(q1);
+    M1inv = inv(M1);
+    [U1,dU1] = nllFunc(q1);
+    dH = computeHq(p12,M1inv,dM1,dU1);
+    A = (h/2)*dc1*M1inv*dc1.';
+    b = dc1*M1inv*(p12 - (h/2)*dH);
+    mu = A\b;
+    p1 = p12 - (h/2)*(dH + dc1.'*mu);
+end
+
+function [f,J] = varM_p12_q1_lambda_func(x,conFunc,Mfunc,p0,q0,h,pMat,Minv,trMinvdM,dU,dc)
+    E = size(dc,1);
+    D = size(dc,2);
+    
+    lambda = reshape(x((1:E)),[E,1]);
+    p12 = reshape(x(E+(1:D)),[D,1]);
+    q1 = reshape(x(E+D+(1:D)),[D,1]);
+    
+    fp12 = p12 - (p0 - (h/2)*(0.5*pMat*reshape(p12*p12.',[],1) - 0.5*trMinvdM + dU + dc.'*lambda));
+    if nargout > 1
+        dfp12dlambda = (h/2)*dc.';
+        dfp12dq1 = sparse(D,D);
+        dfp12dp12 = speye(D) + (h/2)*0.5*pMat*(kron(speye(D),p12) + kron(p12,speye(D)));
+    end
+
+    if nargout > 1
+        [M1 dM1] = Mfunc(q1);
+        M1inv = inv(M1);
+        dM1invdq1 = -vec_matmult(M1inv,0,vec_matmult(dM1,0,M1inv,0),0);
+    
+        dfq1dlambda = sparse(D,E);
+        dfq1dp12 = -(h/2)*(Minv + M1inv);
+        dfq1dq1 = speye(D) - (h/2)*reshape(vec_matmult(dM1invdq1,0,reshape(p12,[D,1,1]),0),[D,D]);
+    else
+        M1inv = inv(Mfunc(q1));
+    end
+    fq1 = q1 - (q0 + (h/2)*(Minv + M1inv)*p12);
+
+
+    if nargout > 1
+        [fc1 dfc1dq1] = conFunc(q1);
+        dfc1dlambda = sparse(E,E);
+        dfc1dp12 = sparse(E,D);
+    else
+        fc1 = conFunc(q1);
+    end
+    
+    f = [fp12;fq1;fc1];
+    if nargout > 1
+        J = [ dfp12dlambda dfp12dp12 dfp12dq1;
+               dfq1dlambda  dfq1dp12  dfq1dq1;
+               dfc1dlambda  dfc1dp12  dfc1dq1 ];
+    end
+end
+
+function [p1,q1,U1,dU1,c1,dc1,Hpp1,Lambda1,stats] = lobattoStep(p0,q0,U0,dU0,c0,dc0,Hpp0,Lambda0,h,Hpfunc,Hppfunc,nllFunc,conFunc,nllGradFunc,stats)
+    fThresh = 1e-4;
+    dxThresh = 1e-6;
+    maxNumIts = 25;
+
+    aijs = h*[0 0 0; 5/24 1/3 -1/24; 1/6 2/3 1/6 ]; % Lobatto IIIA for qs
+    bis = h*[ 1/6 2/3 1/6 ];
+    ahijs = h*[ 1/6 -1/6 0; 1/6 1/3 0; 1/6 5/6 0 ]; % Lobatto IIIB for ps
+    bhis = h*[ 1/6 2/3 1/6 ];
+    cis = h*[0 0.5 1];
+    S = size(aijs,1); % number of stages
+
+
+    assert(all(aijs(1,:) == 0)); % first stage of qs must be q0
+    assert(all(aijs(end,:) == bis)); % last stage of qs must be q1
+    assert(all(ahijs(:,end) == 0)); % stiff accuracy condition means last Lambda is only used to ensure p1 is in the cotangent space of q1
+
+    if ~isempty(conFunc)&&isempty(dc0)
+        [c0,dc0] = conFunc(q0);
+        stats.conFuncCalls = stats.conFuncCalls + 1;
+    end
+    if isempty(dU0)
+        if isempty(nllGradFunc)
+            [U0,dU0] = nllFunc(q0);
+        else
+            U0 = nllFunc(q0);
+            dU0 = nllGradFunc(q0);
+        end
+        stats.nllFuncCalls = stats.nllFuncCalls + 1;
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + 1;
+    end
+
+    D = length(q0);
+    N = size(dc0,1);
+
+    if isempty(Hpp0)
+        Hpp0 = Hppfunc(q0);
+    end
+    if isempty(Lambda0)
+        Lambda0 = zeros([N,1]);
+    end
+    
+    dq0 =  Hpfunc(p0,q0);
+    dp0 = -dU0;
+    if 0
+        Qs = bsxfun(@plus,q0,dq0*cis);
+        Ps = bsxfun(@plus,p0,dp0*cis);
+        Fs = repmat(dq0,[1,S]);
+        Gs = repmat(dp0,[1,S]);
+        Us = repmat(U0,[1,S]);
+        cs = repmat(c0,[1,S]);
+        dcs = cell([1,S]);
+        dcs{1} = dc0;
+        Lambdas = repmat(Lambda0,[1,S-1]);
+        fLambdas = zeros([D,S-1]);
+        
+        for i = 2:S
+            Fs(:,i) =  Hpfunc(Ps(:,i),Qs(:,i));
+            if isempty(nllGradFunc)
+                [Us(i),cdU] = nllFunc(Qs(:,i));
+            else
+                cdU = nllGradFunc(Qs(:,i));
+            end
+            Gs(:,i) = -cdU;
+            [cs(:,i) dcs{i}] = conFunc(Qs(:,i));
+        end
+        if isempty(nllGradFunc)
+            stats.nllFuncCalls = stats.nllFuncCalls + (S-1);
+        end
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + (S-1);
+        stats.conFuncCalls = stats.conFuncCalls + (S-1);
+
+        for i = 1:S-1
+            fLambdas(:,i) = (dcs{i}.'*Lambdas(:,i));
+        end
+    else
+        Qs = repmat(q0,[1,S]);
+        Ps = repmat(p0,[1,S]);
+        Fs = repmat(dq0,[1,S]);
+        Gs = repmat(dp0,[1,S]);
+        Us = repmat(U0,[1,S]);
+        cs = repmat(c0,[1,S]);
+        dcs = cell([1,S]);
+        for i = 1:S
+            dcs{i} = dc0;
+        end
+        Lambdas = repmat(Lambda0,[1,S-1]);
+        fLambdas = zeros([D,S-1]);
+    end
+
+    A = kron(-aijs(2:S,:),Hpp0);
+    B = kron(-ahijs(:,1:(S-1)),dc0.');
+    C = kron(speye(S-1),dc0);
+    CAB = C*A*B;
+
+    J23Tmp = kron(-ahijs(:,1:(S-1)),speye(N,N));
+%     Jhat = [ speye((S-1)*D), kron(-aijs(2:S,:),Hpp0), sparse((S-1)*D,(S-1)*N); ...
+%         sparse(S*D,(S-1)*D),speye(S*D), kron(-ahijs(:,1:(S-1)),dc0.'); ...
+%         kron(speye(S-1),dc0), sparse((S-1)*N,S*D + (S-1)*N) ];
+    itNum = 0;
+    while 1
+        errQs = Qs(:,2:end) - bsxfun(@plus,q0,(Fs*aijs(2:end,:).'));
+        errPs = Ps - bsxfun(@plus,p0,Gs*ahijs.' + fLambdas*ahijs(:,1:(S-1)).');
+        errCs = cs(:,2:end);
+        errs = [errQs(:); errPs(:); errCs(:)];
+
+        if max(abs(cs(:))) < fThresh && all(all(errQs <= max(1e-6, 256*sqrt(eps(Qs(:,2:end)))))) && all(errPs(:) <= max(1e-6,256*sqrt(eps(Ps(:)))))
+            break;
+        end
+        
+        if itNum > maxNumIts
+            p1 = [];
+            q1 = [];
+            U1 = [];
+            dU1 = [];
+            c1 = [];
+            dc1 = [];
+            Hpp1 = [];
+            Lambda1 = [];
+            return;
+        end
+        
+        Jhat = [ speye((S-1)*D), kron(-aijs(2:S,:),Hpp0), sparse((S-1)*D,(S-1)*N); ...
+                 sparse(S*D,(S-1)*D),speye(S*D), blkdiag(dcs{:}).'*J23Tmp; ...
+                 blkdiag(dcs{2:S}), sparse((S-1)*N,S*D + (S-1)*N) ];
+        dX = Jhat\errs;
+
+% %         if mod(itNum,4) == 1
+%             B = blkdiag(dcs{:}).'*J23Tmp;
+%             C = blkdiag(dcs{2:S});
+%             CAB = C*A*B;
+% %         end
+%         dX = computeJinvX(A,B,C,CAB,errs);
+        
+        Qs(:,2:S) = Qs(:,2:S) - reshape(dX(1:(S-1)*D),[D,S-1]);
+        Ps = Ps - reshape(dX(((S-1)*D) + (1:S*D)),[D,S]);
+        Lambdas(:,1:(S-1)) = Lambdas(:,1:(S-1)) - reshape(dX(((2*S-1)*D) + (1:(S-1)*N)),[N,S-1]);
+
+        for i = 1:S
+            Fs(:,i) = Hpfunc(Ps(:,i),Qs(:,i));
+        end
+        for i = 2:S
+            if isempty(nllGradFunc)
+                [Us(i),cdU] = nllFunc(Qs(:,i));
+            else
+                cdU = nllGradFunc(Qs(:,i));
+            end
+            Gs(:,i) = -cdU;
+            [cs(:,i) dcs{i}] = conFunc(Qs(:,i));
+        end
+        if isempty(nllGradFunc)
+            stats.nllFuncCalls = stats.nllFuncCalls + (S-1);
+        end
+        stats.nllGradFuncCalls = stats.nllGradFuncCalls + (S-1);
+        stats.conFuncCalls = stats.conFuncCalls + (S-1);
+
+        for i = 1:S-1
+            fLambdas(:,i) = (dcs{i}.'*Lambdas(:,i));
+        end
+        
+        itNum = itNum + 1;
+%         fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g, norm(dX) = %g, max(abs(cs(:)) = %g\n', ...
+%                 itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)), ...
+%                 norm(dX),max(abs(cs(:))));
+%         fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g\n  norm(dQ) = %g, norm(dP) = %g, norm(dLambda) = %g, max(abs(cs(:)) = %g\n', ...
+%                 itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)), ...
+%                 norm(dX(1:(S-1)*D)),norm(dX(((S-1)*D) + (1:S*D))),norm(dX(((2*S-1)*D) + (1:(S-1)*N))),max(abs(cs(:))));
+%         fprintf('%d: norm(dQ) = %g, norm(dP) = %g, norm(dLambda) = %g, max(abs(cs(:)) = %g\n', ...
+%                 itNum, ...
+%                 norm(dX(1:(S-1)*D)),norm(dX(((S-1)*D) + (1:S*D))),norm(dX(((2*S-1)*D) + (1:(S-1)*N))),max(abs(cs(:))));
+    end
+%     fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g, norm(dX) = %g, max(abs(cs(:)) = %g\n',itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)),norm(dX),max(abs(cs(:))));
+    q1 = Qs(:,S);
+    if isempty(nllGradFunc)
+        U1 = Us(S);
+    else
+        U1 = nllFunc(q1);
+        stats.nllFuncCalls = stats.nllFuncCalls + (S-1);
+    end
+    dU1 = -Gs(:,S);
+    c1 = cs(:,S);
+    dc1 = dcs{S};
+    p1hat = p0 + (Gs*bhis.' + fLambdas*bhis(1:(S-1)).');
+    Hpp1 = Hppfunc(q1);
+    Lambda1 = -((dc1*Hpp1*dc1.')\(dc1*Hpp1*p1hat));
+    p1 = p1hat + dc1.'*Lambda1;
+end
+
+% Compute the inverse of the simplified Jacobian [ I A 0 ; 0 I B; C 0 0 ]
+function Jinv = computeJinv(A,B,C)
+    S = C * A * B;
+    invS = inv(S);
+%     Ab = [speye(size(C,2)) A; sparse(size(A,2),size(C,2)) speye(size(A,2))];
+    invAb = [speye(size(C,2)) -A; sparse(size(A,2),size(C,2)) speye(size(A,2))]; 
+    invAbBb = [-A*B;B]; 
+    CbinvAb = [C,-C*A]; 
+    Jinv12 = -invAbBb*invS; 
+    Jinv21 = -invS*CbinvAb; 
+    Jinv = [ invAb - Jinv12*CbinvAb, Jinv12; Jinv21, invS ];
+end
+
+function [Jix,S] = computeJinvX(A,B,C,S,x)
+    x1 = x(1:size(C,2));
+    x2 = x(size(C,2) + (1:size(A,2)));
+    x3 = x((size(C,2) + size(A,2)) + (1:size(C,1)));
+    assert(length(x) == size(C,2) + size(A,2) + size(C,1));
+
+    if isempty(S)
+        S = C * A * B;
+    end
+    CbinvAbx12 = C*(x1 - A*x2);
+    Jix3 = S\(x3 - CbinvAbx12);
+    Jix2 = x2 - B*Jix3;
+    Jix = [x1 - A*Jix2; Jix2; Jix3 ];
+end
+
+function [p1,q1,c1,dc1,Hpp1,Lambda1] = lobattoStep_generic(p0,q0,c0,dc0,Hpp0,Lambda0,h,Hpfunc,Hppfunc,Hqfunc,conFunc)
+    aijs = h*[0 0 0; 5/24 1/3 -1/24; 1/6 2/3 1/6 ]; % Lobatto IIIA for qs
+    bis = h*[ 1/6 2/3 1/6 ];
+    ahijs = h*[ 1/6 -1/6 0; 1/6 1/3 0; 1/6 5/6 0 ]; % Lobatto IIIB for ps
+    bhis = h*[ 1/6 2/3 1/6 ];
+    cis = h*[0 0.5 1];
+    S = size(aijs,1); % number of stages
+
+
+    assert(all(aijs(1,:) == 0)); % first stage of qs must be q0
+    assert(all(aijs(end,:) == bis)); % last stage of qs must be q1
+    assert(all(ahijs(:,end) == 0)); % stiff accuracy condition means last Lambda is only used to ensure p1 is in the cotangent space of q1
+
+    if ~isempty(conFunc)&&isempty(dc0)
+        [c0,dc0] = conFunc(q0);
+    end
+
+    D = length(q0);
+    N = size(dc0,1);
+
+    if isempty(Hpp0)
+        Hpp0 = Hppfunc(q0);
+    end
+    if isempty(Lambda0)
+        Lambda0 = zeros([N,1]);
+    end
+    
+    dq0 =  Hpfunc(p0,q0);
+    dp0 = -Hqfunc(p0,q0);
+    if 0
+        Qs = bsxfun(@plus,q0,dq0*cis);
+        Ps = bsxfun(@plus,p0,dp0*cis);
+        Fs = repmat(dq0,[1,S]);
+        Gs = repmat(dp0,[1,S]);
+        cs = repmat(c0,[1,S]);
+        dcs = cell([1,S]);
+        dcs{1} = dc0;
+        Lambdas = repmat(Lambda0,[1,S-1]);
+        fLambdas = zeros([D,S-1]);
+        
+        for i = 2:S
+            Fs(:,i) =  Hpfunc(Ps(:,i),Qs(:,i));
+            Gs(:,i) = -Hqfunc(Ps(:,i),Qs(:,i));
+            [cs(:,i) dcs{i}] = conFunc(Qs(:,i));
+        end
+        for i = 1:S-1
+            fLambdas(:,i) = (dcs{i}.'*Lambdas(:,i));
+        end
+    else
+        Qs = repmat(q0,[1,S]);
+        Ps = repmat(p0,[1,S]);
+        Fs = repmat(dq0,[1,S]);
+        Gs = repmat(dp0,[1,S]);
+        cs = repmat(c0,[1,S]);
+        dcs = cell([1,S]);
+        for i = 1:S
+            dcs{i} = dc0;
+        end
+        Lambdas = repmat(Lambda0,[1,S-1]);
+        fLambdas = zeros([D,S-1]);
+    end
+
+    J1Tmp = kron(-aijs(2:end,:),Hpp0);
+%     J1 = [speye((S-1)*D), J1Tmp, sparse((S-1)*D,(S-1)*N)];
+%     J2Tmp = [sparse(S*D,(S-1)*D),speye(S*D)];
+    J23Tmp = kron(-ahijs(:,1:(S-1)),speye(N,N));
+%     Jhat = [J1; ...
+%             J2Tmp, kron(-ahijs(:,1:(end-1)),dc0.'); ...
+%             kron(speye(S-1),dc0), sparse((S-1)*N,S*D + (S-1)*N) ];
+    itNum = 0;
+    while 1
+        itNum = itNum + 1;
+        errQs = Qs(:,2:end) - bsxfun(@plus,q0,(Fs*aijs(2:end,:).'));
+        errPs = Ps - bsxfun(@plus,p0,Gs*ahijs.' + fLambdas*ahijs(:,1:(S-1)).');
+        errCs = cs(:,2:end);
+        errs = [errQs(:); errPs(:); errCs(:)];
+
+%         Jhat = [ J1; ...
+%                  sparse(S*D,(S-1)*D),                speye(S*D), blkdiag(dcs{:}).'*J23Tmp; ...
+%                    blkdiag(dcs{2:S}),       sparse((S-1)*N,S*D),                              sparse((S-1)*N,(S-1)*N) ];
+%         dX = Jhat\errs;
+        dX = computeJinvX(J1Tmp,blkdiag(dcs{:}).'*J23Tmp,blkdiag(dcs{2:S}),[],errs);
+        Qs(:,2:S) = Qs(:,2:S) - reshape(dX(1:(S-1)*D),[D,S-1]);
+        Ps = Ps - reshape(dX(((S-1)*D) + (1:S*D)),[D,S]);
+        Lambdas(:,1:(S-1)) = Lambdas(:,1:(S-1)) - reshape(dX(((2*S-1)*D) + (1:(S-1)*N)),[N,S-1]);
+
+        % NOTE: Qs(:,1) will not change over iterations
+        for i = 1:S
+            Fs(:,i) = Hpfunc(Ps(:,i),Qs(:,i));
+            Gs(:,i) = -Hqfunc(Ps(:,i),Qs(:,i));
+        end
+        for i = 2:S
+            [cs(:,i) dcs{i}] = conFunc(Qs(:,i));
+        end
+        for i = 1:S-1
+            fLambdas(:,i) = (dcs{i}.'*Lambdas(:,i));
+        end
+        
+%         fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g, norm(dX) = %g, max(abs(cs(:)) = %g\n',itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)),norm(dX),max(abs(cs(:))));
+%         if max(abs(cs(:))) < 1e-6 && norm(dX) < 1e-6
+        if max(abs(cs(:))) < 1e-5 && all(all(errQs <= max(1e-8, 256*sqrt(eps(Qs(:,2:end)))))) && all(errPs(:) <= max(1e-8,256*sqrt(eps(Ps(:)))))
+            break;
+        end
+    end
+%     fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g, norm(dX) = %g, max(abs(cs(:)) = %g\n',itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)),norm(dX),max(abs(cs(:))));
+    q1 = Qs(:,S);
+    c1 = cs(:,S);
+    dc1 = dcs{S};
+    p1hat = p0 + (Gs*bhis.' + fLambdas*bhis(1:(S-1)).');
+    Hpp1 = Hppfunc(q1);
+    Lambda1 = -((dc1*Hpp1*dc1.')\(dc1*Hpp1*p1hat));
+    p1 = p1hat + dc1.'*Lambda1;
+end
+
+% function [p1,q1,c1,dc1,Hpp1,Lambda1,h] = lobattoStep_generic_varH(p0,q0,c0,dc0,Hpp0,Lambda0,h,Hpfunc,Hppfunc,Hqfunc,conFunc,errFunc)
+%     base_aijs = [0 0 0; 5/24 1/3 -1/24; 1/6 2/3 1/6 ]; % Lobatto IIIA for qs
+%     base_bis = [ 1/6 2/3 1/6 ];
+%     base_ahijs = [ 1/6 -1/6 0; 1/6 1/3 0; 1/6 5/6 0 ]; % Lobatto IIIB for ps
+%     base_bhis = [ 1/6 2/3 1/6 ];
+%     base_cis = [0 0.5 1];
+%     S = size(aijs,1); % number of stages
+% 
+% 
+%     assert(all(aijs(1,:) == 0)); % first stage of qs must be q0
+%     assert(all(aijs(end,:) == bis)); % last stage of qs must be q1
+%     assert(all(ahijs(:,end) == 0)); % stiff accuracy condition means last Lambda is only used to ensure p1 is in the cotangent space of q1
+% 
+%     if isempty(dc0)
+%         [c0,dc0] = conFunc(q0);
+%     end
+% 
+%     D = length(q0);
+%     N = size(dc0,1);
+% 
+%     if isempty(Hpp0)
+%         Hpp0 = Hppfunc(q0);
+%     end
+%     if isempty(Lambda0)
+%         Lambda0 = zeros([N,1]);
+%     end
+%     
+%     dq0 =  Hpfunc(p0,q0);
+%     dp0 = -Hqfunc(p0,q0);
+%     if 0
+%         Qs = bsxfun(@plus,q0,dq0*(h*cis));
+%         Ps = bsxfun(@plus,p0,dp0*(h*cis));
+%         Fs = repmat(dq0,[1,S]);
+%         Gs = repmat(dp0,[1,S]);
+%         cs = repmat(c0,[1,S]);
+%         dcs = cell([1,S]);
+%         dcs{1} = dc0;
+%         Lambdas = repmat(Lambda0,[1,S-1]);
+%         fLambdas = zeros([D,S-1]);
+%         
+%         for i = 2:S
+%             Fs(:,i) =  Hpfunc(Ps(:,i),Qs(:,i));
+%             Gs(:,i) = -Hqfunc(Ps(:,i),Qs(:,i));
+%             [cs(:,i) dcs{i}] = conFunc(Qs(:,i));
+%         end
+%         for i = 1:S-1
+%             fLambdas(:,i) = (dcs{i}.'*Lambdas(:,i));
+%         end
+%     else
+%         Qs = repmat(q0,[1,S]);
+%         Ps = repmat(p0,[1,S]);
+%         Fs = repmat(dq0,[1,S]);
+%         Gs = repmat(dp0,[1,S]);
+%         cs = repmat(c0,[1,S]);
+%         dcs = cell([1,S]);
+%         for i = 1:S
+%             dcs{i} = dc0;
+%         end
+%         Lambdas = repmat(Lambda0,[1,S-1]);
+%         fLambdas = zeros([D,S-1]);
+%     end
+%     q1 = Qs(:,S);
+%     c1 = cs(:,S);
+%     dc1 = dcs{S};
+%     p1hat = p0 + h*(Gs*bhis.' + fLambdas*bhis(1:(S-1)).');
+%     Hpp1 = Hppfunc(q1);
+%     Lambda1 = -((dc1*Hpp1*dc1.')\(dc1*Hpp1*p1hat));
+%     p1 = p1hat + dc1.'*Lambda1;
+% 
+%     J1Tmp = kron(-base_aijs(2:end,:),Hpp0);
+%     J23Tmp = kron(-base_ahijs(:,1:(S-1)),speye(N,N));
+%     itNum = 0;
+%     while 1
+%         itNum = itNum + 1;
+%         Fsaijs = Fs*base_aijs(2:end,:).';
+%         GsLambdasahijs = Gs*base_ahijs.' + fLambdas*base_ahijs(:,1:(S-1)).';
+%         errQs = Qs(:,2:end) - bsxfun(@plus,q0,h*Fsaijs);
+%         errPs = Ps - bsxfun(@plus,p0,h*GsLambdasahijs);
+%         errCs = cs(:,2:end);
+%         [errH, dErrHdQ, dErrHdP] = errFunc(p1,q1);
+%         errs = [errQs(:); errPs(:); errCs(:); errH];
+% 
+%         dX = computeJinvX(h*J1Tmp,blkdiag(dcs{:}).'*(h*J23Tmp),blkdiag(dcs{2:S}),[],errs);
+%         Qs(:,2:S) = Qs(:,2:S) - reshape(dX(1:(S-1)*D),[D,S-1]);
+%         Ps = Ps - reshape(dX(((S-1)*D) + (1:S*D)),[D,S]);
+%         Lambdas(:,1:(S-1)) = Lambdas(:,1:(S-1)) - reshape(dX(((2*S-1)*D) + (1:(S-1)*N)),[N,S-1]);
+% 
+%         % NOTE: Qs(:,1) will not change over iterations
+%         for i = 1:S
+%             Fs(:,i) = Hpfunc(Ps(:,i),Qs(:,i));
+%             Gs(:,i) = -Hqfunc(Ps(:,i),Qs(:,i));
+%         end
+%         for i = 2:S
+%             [cs(:,i) dcs{i}] = conFunc(Qs(:,i));
+%         end
+%         for i = 1:S-1
+%             fLambdas(:,i) = (dcs{i}.'*Lambdas(:,i));
+%         end
+%         
+%         q1 = Qs(:,S);
+%         c1 = cs(:,S);
+%         dc1 = dcs{S};
+%         p1hat = p0 + h*(Gs*bhis.' + fLambdas*bhis(1:(S-1)).');
+%         Hpp1 = Hppfunc(q1);
+%         Lambda1 = -((dc1*Hpp1*dc1.')\(dc1*Hpp1*p1hat));
+%         p1 = p1hat + dc1.'*Lambda1;
+% %         fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g, norm(dX) = %g, max(abs(cs(:)) = %g\n',itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)),norm(dX),max(abs(cs(:))));
+% %         if max(abs(cs(:))) < 1e-6 && norm(dX) < 1e-6
+%         if max(abs(cs(:))) < 1e-5 && all(all(errQs <= max(1e-8, 256*sqrt(eps(Qs(:,2:end)))))) && all(errPs(:) <= max(1e-8,256*sqrt(eps(Ps(:)))))
+%             break;
+%         end
+%     end
+% %     fprintf('%d: norm(errQs) = %g, norm(errPs) = %g, norm(errCs) = %g, norm(dX) = %g, max(abs(cs(:)) = %g\n',itNum,norm(errQs(:)),norm(errPs(:)),norm(errCs(:)),norm(dX),max(abs(cs(:))));
+% end
+% 
+% function dX = computeJHatinvX(A,B,C,Bp,Cp,Dp,errs)
+%     tmpCAB = [];
+% end
+
+function x = erand(sz)
+    if nargin > 0
+        x = -log(rand(sz));
+    else
+        x = -log(rand);
+    end
+end

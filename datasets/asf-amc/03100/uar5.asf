@@ -1,0 +1,274 @@
+# File created by Blade
+# Date/Time:  Tue Sep 30 19:29:03 2014
+#---------------------------------------------------------
+:version 1.10
+:name HOM
+:units
+  mass 1.0
+  length 1.000000
+  angle deg
+:documentation
+     Acclaim Skeleton File
+:root
+   axis xyz
+   order TX TY TZ RX RY RZ
+   position 0.000000 0.000000 0.000000
+   orientation 0 0 0
+:bonedata
+   begin
+      id 1
+      name RightUpLeg_dum
+      direction -1.000000 0.000000 0.000000
+      length 3.766986
+      axis 0.0 0.0 0.0 xyz
+   end
+   begin
+      id 2
+      name LeftUpLeg_dum
+      direction 1.000000 0.000000 0.000000
+      length 3.766986
+      axis 0.0 0.0 0.0 xyz
+   end
+   begin
+      id 3
+      name Spine_dum
+      direction 0.000000 1.000000 0.000000
+      length 7.779697
+      axis 0.0 0.0 0.0 xyz
+   end
+   begin
+      id 4
+      name RightUpLeg
+      direction 0.000000 -1.000000 0.000000
+      length 18.017682
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 5
+      name RightLeg
+      direction 0.000000 -1.000000 0.000000
+      length 16.881075
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 6
+      name RightFoot
+      direction 0.000000 -0.258819 0.965926
+      length 5.770812
+      axis 15.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 7
+      name RightToeBase
+      direction 0.000000 0.000000 1.000000
+      length 2.952750
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 8
+      name LeftUpLeg
+      direction 0.000000 -1.000000 0.000000
+      length 18.017682
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 9
+      name LeftLeg
+      direction 0.000000 -1.000000 0.000000
+      length 16.881075
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 10
+      name LeftFoot
+      direction 0.000000 -0.258819 0.965926
+      length 5.770812
+      axis 15.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 11
+      name LeftToeBase
+      direction 0.000000 0.000000 1.000000
+      length 2.952750
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 12
+      name Spine
+      direction 0.000000 1.000000 0.000000
+      length 0.000000
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 13
+      name Spine_dum1
+      direction 0.000000 1.000000 0.000000
+      length 10.941760
+      axis 0.0 0.0 0.0 xyz
+   end
+   begin
+      id 14
+      name Spine_dum2
+      direction 0.000000 1.000000 0.000000
+      length 10.941760
+      axis 0.0 0.0 0.0 xyz
+   end
+   begin
+      id 15
+      name Spine_dum3
+      direction 0.000000 1.000000 0.000000
+      length 16.646042
+      axis 0.0 0.0 0.0 xyz
+   end
+   begin
+      id 16
+      name RightShoulder
+      direction -1.000000 0.000000 0.000000
+      length 7.708937
+      axis 0.0 0.0 90.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 17
+      name RightArm
+      direction -1.000000 0.000000 0.000000
+      length 11.521345
+      axis 0.0 0.0 90.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 18
+      name RightForeArm
+      direction -1.000000 0.000000 0.000000
+      length 10.175898
+      axis 0.0 0.0 90.0 xyz
+      dof ry rz rx
+   end
+   begin
+      id 19
+      name RightHand
+      direction -1.000000 0.000000 0.000000
+      length 0.000000
+      axis 0.0 0.0 90.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 20
+      name RightHand_dum1
+      direction -1.000000 0.000000 0.000000
+      length 3.937000
+      axis 0.0 0.0 90.0 xyz
+   end
+   begin
+      id 21
+      name RightHand_dum2
+      direction 0.000000 0.000000 0.000000
+      length 0.000000
+      axis 0.0 0.0 90.0 xyz
+   end
+   begin
+      id 22
+      name RightHandThumb1
+      direction 0.000000 0.000000 1.000000
+      length 3.937000
+      axis 0.0 0.0 90.0 xyz
+      dof rx rz ry
+   end
+   begin
+      id 23
+      name LeftShoulder
+      direction 1.000000 0.000000 0.000000
+      length 7.708937
+      axis 0.0 0.0 -90.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 24
+      name LeftArm
+      direction 1.000000 0.000000 0.000000
+      length 11.521345
+      axis 0.0 0.0 -90.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 25
+      name LeftForeArm
+      direction 1.000000 0.000000 0.000000
+      length 10.175898
+      axis 0.0 0.0 -90.0 xyz
+      dof ry rz rx
+   end
+   begin
+      id 26
+      name LeftHand
+      direction 1.000000 0.000000 0.000000
+      length 0.000000
+      axis 0.0 0.0 -90.0 xyz
+      dof rx ry rz
+   end
+   begin
+      id 27
+      name LeftHand_dum1
+      direction 1.000000 0.000000 0.000000
+      length 3.937000
+      axis 0.0 0.0 -90.0 xyz
+   end
+   begin
+      id 28
+      name LeftHand_dum2
+      direction 0.000000 0.000000 0.000000
+      length 0.000000
+      axis 0.0 0.0 -90.0 xyz
+   end
+   begin
+      id 29
+      name LeftHandThumb1
+      direction 0.000000 0.000000 1.000000
+      length 3.937000
+      axis 0.0 0.0 -90.0 xyz
+      dof rx rz ry
+   end
+   begin
+      id 30
+      name Head
+      direction 0.000000 1.000000 0.000000
+      length 4.527550
+      axis 0.0 0.0 0.0 xyz
+      dof rx ry rz
+   end
+:hierarchy
+   begin
+      root RightUpLeg_dum LeftUpLeg_dum Spine_dum
+      RightUpLeg_dum RightUpLeg
+      LeftUpLeg_dum LeftUpLeg
+      Spine_dum Spine
+      RightUpLeg RightLeg
+      RightLeg RightFoot
+      RightFoot RightToeBase
+      LeftUpLeg LeftLeg
+      LeftLeg LeftFoot
+      LeftFoot LeftToeBase
+      Spine Spine_dum1 Spine_dum2 Spine_dum3
+      Spine_dum1 RightShoulder
+      Spine_dum2 LeftShoulder
+      Spine_dum3 Head
+      RightShoulder RightArm
+      RightArm RightForeArm
+      RightForeArm RightHand
+      RightHand RightHand_dum1 RightHand_dum2
+      RightHand_dum2 RightHandThumb1
+      LeftShoulder LeftArm
+      LeftArm LeftForeArm
+      LeftForeArm LeftHand
+      LeftHand LeftHand_dum1 LeftHand_dum2
+      LeftHand_dum2 LeftHandThumb1
+   end
