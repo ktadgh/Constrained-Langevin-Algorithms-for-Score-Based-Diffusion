@@ -19,8 +19,9 @@ def G(gs):
 
 def J(gs, x):
     '''Returns the Jacobian evaluated at x for a list gs of constraint functions'''
-    jac_batched = jacobian(G(gs), torch.squeeze(x)) # shape (fns, batch_size, batch_size, dims)
-    return jac_batched.permute(0, 3, 1, 2).diagonal(dim1=-2, dim2=-1).permute(2, 0, 1)
+    jac_batched = jacobian(G(gs), x) # shape (fns, batch_size, batch_size, dims)
+    r = jac_batched.permute(1, 3, 0, 2).diagonal(dim1=-2, dim2=-1).permute(2, 0, 1)
+    return r
 
 
 
@@ -37,10 +38,10 @@ def rattle_step(x, v1, h, M, gs, e):
 
 
     DV = torch.zeros_like(x)
-
-    DV_col = DV.reshape(-1, 1)
-
     batch_size = x.shape[0]
+    DV_col = DV.reshape(batch_size,-1, 1)
+
+    
     x_col = x.reshape(batch_size,-1, 1)
     v1_col = v1.reshape(batch_size,-1, 1)
 
@@ -52,9 +53,9 @@ def rattle_step(x, v1, h, M, gs, e):
 
     for _ in range(3):
         J2 = J(gs, torch.squeeze(Q))
-        R = torch.bmm(torch.bmm(J2,M),J1.t())
-        dL = torch.bmm(torch.linalg.inv(R),G1(Q))
-        Q= Q- torch.bmm(torch.bmm(M,J1.t()), dL)
+        R = torch.bmm(torch.bmm(J2,M),J1.mT)
+        dL = torch.bmm(torch.linalg.inv(R),G1(Q).unsqueeze(-1))
+        Q= Q- torch.bmm(torch.bmm(M,J1.mT), dL).squeeze(-1)
 
     # half step for velocity
     Q_col = Q.reshape(batch_size,-1,1)
@@ -64,13 +65,13 @@ def rattle_step(x, v1, h, M, gs, e):
 
     # getting the level
     J2 = J(gs, torch.squeeze(Q))
-    P = torch.bmm(torch.bmm(J1, M),J1.t())
+    P = torch.bmm(torch.bmm(J1, M),J1.mT)
     T = torch.bmm(J1, (2/h * v1_half - torch.bmm(M, DV_col)))
 
     #solving the linear system
     L = torch.linalg.solve(P,T)
 
-    v1_col = v1_half - h/2 * DV_col - h/2 * torch.bmm(J2.t(),L)
+    v1_col = v1_half - h/2 * DV_col - h/2 * torch.bmm(J2.mT,L)
 
     return torch.squeeze(x_col), torch.squeeze(v1_col)
 
@@ -79,7 +80,7 @@ def gBAOAB_step(q_init,p_init,F, gs, h,M, gamma, k, kr,e):
     # setting up variables
     M1 = M
     batch_size = q_init.shape[0]
-    R = torch.randn(batch_size, len(q_init))
+    R = torch.randn(batch_size, q_init.shape[1])
     p = p_init
     q = q_init
 
@@ -90,8 +91,11 @@ def gBAOAB_step(q_init,p_init,F, gs, h,M, gamma, k, kr,e):
     # doing the initial p-update
     J1 = J(gs,q)
     G = J1
-    L1 = torch.eye(len(q_init)) - torch.bmm(torch.bmm(torch.transpose(G,-2,-1),torch.inverse(torch.bmm(torch.bmm(G, M1), torch.transpose(G,0,1))), torch.bmm(G , M1)))
-    p = p-  h/2 * torch.bmm(L1, F(q))
+    to_invert = torch.bmm(torch.bmm(G, M1), torch.transpose(G,-2,-1))
+    t2 = torch.bmm(torch.inverse(to_invert), torch.bmm(G , M1))
+    # raise ValueError(torch.bmm(torch.transpose(G,-2,-1),t2).shape)
+    L1 = torch.eye(q_init.shape[1]) - torch.bmm(torch.transpose(G,-2,-1),t2)
+    p = p-  h/2 * torch.bmm(L1, F(q).unsqueeze(-1)).squeeze(-1)
 
 
     # doing the first RATTLE step
@@ -102,8 +106,10 @@ def gBAOAB_step(q_init,p_init,F, gs, h,M, gamma, k, kr,e):
     # the second p-update - (O-step in BAOAB)
     J2 = J(gs,q)
     G = J2
-    L2 = torch.eye(len(q_init)) - torch.transpose(G,-2,-1) @ torch.inverse(torch.bmm(G, torch.bmm(M1,torch.bmm(torch.transpose(G,-1,-2)), torch.bmm(G, M1))))
-    p = a2* p + b2* torch.bmm(torch.bmm(torch.bmm(M**(1/2),L2), M**(1/2)), R)
+    to_invert=torch.bmm(G, torch.bmm(M1,torch.transpose(G,-1,-2)))
+    # raise ValueError(torch.bmm(G, M1).shape, torch.bmm(torch.transpose(G,-2,-1),torch.inverse(to_invert)).shape)
+    L2 = torch.eye(q_init.shape[1]) - torch.bmm(torch.bmm(torch.transpose(G,-2,-1),torch.inverse(to_invert)), torch.bmm(G, M1))
+    p = a2* p + b2* torch.bmm(torch.bmm(torch.bmm(M**(1/2),L2), M**(1/2)), R.unsqueeze(-1)).squeeze(-1)
 
     # doing the second RATTLE step
     for i in range(kr):
@@ -111,10 +117,11 @@ def gBAOAB_step(q_init,p_init,F, gs, h,M, gamma, k, kr,e):
 
 
     # the final p update
-    J3= J(gs,torch.squeeze(q))
+    J3= J(gs,q)
     G = J3
-    L3 = torch.eye(len(q_init)) - torch.bmm(torch.bmm(torch.bmm(torch.transpose(G,-2,-1), torch.inverse(G@ M1@ torch.transpose(G,0,1))), G), M1)
-    p = p-  h/2 * torch.bmm(L3, F(q))
+
+    L3 = torch.eye(q_init.shape[1]) - torch.bmm(torch.bmm(torch.bmm(torch.transpose(G,-2,-1), torch.inverse(G@ M1@ torch.transpose(G,-2,-1))), G), M1)
+    p = p-  h/2 * torch.bmm(L3, F(q).unsqueeze(-1)).squeeze(-1)
 
     return q,p
 
@@ -130,3 +137,17 @@ def gBAOAB_integrator(q_init,p_init,F, gs, h,M, gamma, k, steps,kr,e):
         velocities.append(p)
 
     return positions, velocities
+
+
+def cotangent_projection(gs):
+    def proj(x):
+        G = J(gs,x)
+        M = torch.eye(G.size()[2]).broadcast_to(x.shape[0],G.size()[2],G.size()[2])
+        # print(G.shape, M.shape)
+        # print((G.mT).shape,torch.bmm(G,M).shape)
+        to_invert = torch.bmm(torch.bmm(G,M),G.mT)
+
+        L= torch.eye(G.size()[2]) - torch.bmm(torch.bmm(G.mT, torch.inverse(to_invert)) ,torch.bmm(G ,torch.inverse(M)))
+        raise ValueError(L.shape, G.shape)
+        return L, G
+    return proj
