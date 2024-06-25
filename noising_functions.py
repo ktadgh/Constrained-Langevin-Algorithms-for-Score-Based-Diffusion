@@ -19,7 +19,10 @@ def G(gs):
 
 def J(gs, x):
     '''Returns the Jacobian evaluated at x for a list gs of constraint functions'''
-    return jacobian(G(gs), torch.squeeze(x))
+    jac_batched = jacobian(G(gs), torch.squeeze(x)) # shape (fns, batch_size, batch_size, dims)
+    return jac_batched.permute(0, 3, 1, 2).diagonal(dim1=-2, dim2=-1).permute(2, 0, 1)
+
+
 
 def rattle_step(x, v1, h, M, gs, e):
     '''
@@ -70,3 +73,60 @@ def rattle_step(x, v1, h, M, gs, e):
     v1_col = v1_half - h/2 * DV_col - h/2 * torch.bmm(J2.t(),L)
 
     return torch.squeeze(x_col), torch.squeeze(v1_col)
+
+
+def gBAOAB_step(q_init,p_init,F, gs, h,M, gamma, k, kr,e):
+    # setting up variables
+    M1 = M
+    batch_size = q_init.shape[0]
+    R = torch.randn(batch_size, len(q_init))
+    p = p_init
+    q = q_init
+
+    a2 = torch.exp(torch.tensor(-gamma*h))
+    b2 = torch.sqrt(k*(1-a2**(2)))
+
+
+    # doing the initial p-update
+    J1 = J(gs,q)
+    G = J1
+    L1 = torch.eye(len(q_init)) - torch.bmm(torch.bmm(torch.transpose(G,-2,-1),torch.inverse(torch.bmm(torch.bmm(G, M1), torch.transpose(G,0,1))), torch.bmm(G , M1)))
+    p = p-  h/2 * torch.bmm(L1, F(q))
+
+
+    # doing the first RATTLE step
+    for _ in range(kr):
+      q, p = rattle_step(q, p, h/2*kr, M, gs, e)
+
+
+    # the second p-update - (O-step in BAOAB)
+    J2 = J(gs,q)
+    G = J2
+    L2 = torch.eye(len(q_init)) - torch.transpose(G,-2,-1) @ torch.inverse(torch.bmm(G, torch.bmm(M1,torch.bmm(torch.transpose(G,-1,-2)), torch.bmm(G, M1))))
+    p = a2* p + b2* torch.bmm(torch.bmm(torch.bmm(M**(1/2),L2), M**(1/2)), R)
+
+    # doing the second RATTLE step
+    for i in range(kr):
+      q, p = rattle_step(q, p, h/2*kr, M, gs, e)
+
+
+    # the final p update
+    J3= J(gs,torch.squeeze(q))
+    G = J3
+    L3 = torch.eye(len(q_init)) - torch.bmm(torch.bmm(torch.bmm(torch.transpose(G,-2,-1), torch.inverse(G@ M1@ torch.transpose(G,0,1))), G), M1)
+    p = p-  h/2 * torch.bmm(L3, F(q))
+
+    return q,p
+
+
+def gBAOAB_integrator(q_init,p_init,F, gs, h,M, gamma, k, steps,kr,e):
+    positions = []
+    velocities = []
+    q = q_init
+    p = p_init
+    for _ in range(steps):
+        q, p = gBAOAB_step(q,p, F,gs, h,M, gamma, k,kr,e)
+        positions.append(q)
+        velocities.append(p)
+
+    return positions, velocities
