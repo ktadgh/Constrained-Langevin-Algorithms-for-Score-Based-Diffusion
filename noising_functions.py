@@ -148,6 +148,5 @@ def cotangent_projection(gs):
         to_invert = torch.bmm(torch.bmm(G,M),G.mT)
 
         L= torch.eye(G.size()[2]) - torch.bmm(torch.bmm(G.mT, torch.inverse(to_invert)) ,torch.bmm(G ,torch.inverse(M)))
-        raise ValueError(L.shape, G.shape)
         return L, G
     return proj
